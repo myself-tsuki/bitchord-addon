@@ -1,0 +1,14 @@
+.git
+.github
+node_modules
+.wrangler
+test
+*.md
+*.ms
+.env
+.env.*
+.dev.vars
+Dockerfile
+docker-compose.yml
+render.yaml
+wrangler.toml

@@ -57,3 +57,12 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(port, () => console.log(`Muzo Data BitChord addon listening on :${port}`));
+
+// Exit cleanly on `docker stop` / platform restarts (Node as PID 1 ignores signals otherwise).
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, () => {
+    server.close(() => process.exit(0));
+    server.closeAllConnections?.(); // open audio streams would keep close() waiting
+    setTimeout(() => process.exit(0), 5000).unref();
+  });
+}

@@ -69,6 +69,21 @@ wrangler deploy
 
 Your addon is at `https://muzo-bitchord-addon.<your-subdomain>.workers.dev/`. A custom domain can be added in the dashboard.
 
+### Run with Docker (any VPS or container host)
+
+```bash
+docker build -t muzo-bitchord-addon .
+docker run -d --name muzo-addon --restart unless-stopped -p 8787:8787 \
+  -e MEDIA_SECRET="$(openssl rand -hex 32)" muzo-bitchord-addon
+```
+
+Or with Compose: `cp .env.example .env`, set `MEDIA_SECRET`, then `docker compose up -d`.
+
+- The image is `node:20-alpine` with no npm packages. It runs as the non-root `node` user, has a `/health` `HEALTHCHECK` and listens on `PORT` (default 8787).
+- BitChord needs **HTTPS**, so put the container behind a TLS reverse proxy (Caddy, Nginx, Traefik or a Cloudflare Tunnel) and give listeners that `https://` address. The proxy must pass `Host` (or `X-Forwarded-Host`/`X-Forwarded-Proto`): the addon builds its media links from it.
+- Keep `MEDIA_SECRET` the same across restarts, or media links issued before the restart stop working (players simply fetch a new one).
+- Container platforms such as Google Cloud Run, Fly.io, Koyeb, Railway and Render (Docker runtime) can deploy this Dockerfile directly. On Cloud Run, raise the request timeout (default 5 min, max 60 min) so long audio streams aren't cut.
+
 ### Deploy to Render
 
 Push this repo, then in Render choose **New → Blueprint** and pick the repo. `render.yaml` sets the start command,
