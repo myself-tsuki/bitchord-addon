@@ -1,0 +1,15 @@
+{
+  "name": "muzo-bitchord-addon",
+  "version": "1.0.0",
+  "description": "BitChord addon that streams from Muzo Data (data.kouzu.in) with each listener's own API key",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "test": "node --test test/",
+    "check": "node --check server.mjs && node --check src/addon.mjs && node --check src/worker.mjs && node --test test/",
+    "deploy": "npx wrangler deploy"
+  }
+}

@@ -1,0 +1,8 @@
+name = "muzo-bitchord-addon"
+main = "src/worker.mjs"
+compatibility_date = "2025-01-01"
+
+# Set the secret once with:  npx wrangler secret put MEDIA_SECRET
+# Optional: media link lifetime in seconds (default 1800 = 30 min).
+[vars]
+MEDIA_TTL_SECONDS = "1800"

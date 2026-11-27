@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: muzo-bitchord-addon
+    runtime: node
+    plan: free
+    buildCommand: "true"
+    startCommand: node server.mjs
+    healthCheckPath: /health
+    envVars:
+      - key: MEDIA_SECRET
+        generateValue: true
+      - key: MEDIA_TTL_SECONDS
+        value: "1800"
