@@ -1,5 +1,4 @@
 # docker compose up -d
-# Put MEDIA_SECRET in a .env file next to this one (see .env.example).
 services:
   addon:
     build: .
@@ -7,9 +6,6 @@ services:
     restart: unless-stopped
     ports:
       - "${PORT:-8787}:8787"
-    environment:
-      MEDIA_SECRET: ${MEDIA_SECRET:?Set MEDIA_SECRET in .env (e.g. openssl rand -hex 32)}
-      MEDIA_TTL_SECONDS: ${MEDIA_TTL_SECONDS:-1800}
     read_only: true
     security_opt:
       - no-new-privileges:true

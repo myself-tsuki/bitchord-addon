@@ -1,11 +1,10 @@
 # Muzo Data addon for BitChord: small, dependency-free Node image.
 #   docker build -t muzo-bitchord-addon .
-#   docker run -d -p 8787:8787 -e MEDIA_SECRET=$(openssl rand -hex 32) muzo-bitchord-addon
+#   docker run -d -p 8787:8787 muzo-bitchord-addon
 FROM node:20-alpine
 
 ENV NODE_ENV=production \
-    PORT=8787 \
-    MEDIA_TTL_SECONDS=1800
+    PORT=8787
 
 WORKDIR /app
 

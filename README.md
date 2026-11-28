@@ -23,10 +23,16 @@ Keep the URL private. If it leaks, roll the key in the Muzo console.
 | Action in BitChord | Muzo call | Credits |
 | --- | --- | --- |
 | Search | `/api/v1/ytm/search` (cached 10 min per key+query) | 0.25 |
-| Play / download | CDN probe + byte stream | 0 |
+| Play / download | `/api/v1/stream?id=` (not counted against the daily quota) | 0 |
 | Track not in catalog | `/api/v1/stream/add` (queues it, no key) | 0 |
 
-The `/api/v1/stream` resolver isn't used: the addon builds the CDN URL directly, so playback is free.
+**No audio proxy.** `/stream` returns the direct CDN URL Muzo Data's `/api/v1/stream` gives (`losslessUrl`, or
+`m4aUrl` for AAC), unchanged. BitChord's player fetches the audio straight from the Muzo CDN; no audio bytes pass
+through this addon, so hosting needs almost no bandwidth.
+
+If the resolver refuses because the listener's daily quota is used up (429), or can't be reached, the addon still
+hands out a direct URL: the same `/muzo/cnd/...` link on one of Muzo's open CDN nodes, confirmed with a 1-byte request.
+Audio streaming on the Muzo CDN is unlimited, so playback keeps working; only searches wait for the 00:00 UTC reset.
 
 ## Routes
 
@@ -36,34 +42,26 @@ The `/api/v1/stream` resolver isn't used: the addon builds the CDN URL directly,
 | `GET /health` | Liveness |
 | `GET /<key>/manifest.json` | BitChord manifest (`search`, `stream`, quality picker) |
 | `GET /<key>/search?q=&quality=` | BitChord search |
-| `GET /<key>/stream/<videoId>?quality=` | BitChord stream: FLAC first (with real sample rate and bit depth read from the file header), AAC fallback |
+| `GET /<key>/stream/<videoId>?quality=` | BitChord stream: Muzo's direct FLAC URL first, AAC fallback |
 | `GET /<key>/usage` | The key's quota (numbers only) |
-| `GET /m/<token>` | Media proxy (see below) |
-
-**Why there is a media proxy:** the Muzo CDN only accepts the key in an `Authorization: Bearer` header, and BitChord's
-player fetches stream URLs without custom headers. `/stream` therefore returns `/m/<token>`, where the token is
-AES-GCM-encrypted with `MEDIA_SECRET` (so the raw key never appears in the media URL) and expires after
-`MEDIA_TTL_SECONDS` (default 30 min, as BitChord's docs recommend). The proxy adds the header, forwards `Range` for
-seeking and streams the bytes through.
 
 ## Where to host it: serverless or a full server?
 
-Serverless works, **but it has to be a platform that streams long responses**, because every song's audio passes
-through the media proxy.
+Any platform works: the addon only answers small JSON requests (search, stream link, manifest), and audio never
+passes through it.
 
 | Platform | Verdict | Why |
 | --- | --- | --- |
-| **Cloudflare Workers** | ✅ **Recommended** | Free plan: 100k requests/day. Streamed bodies don't count against CPU time, there's no wall-clock cap while the player is connected, egress is free, and it starts instantly. The Muzo CDN itself runs on Workers. |
-| Render / Railway / Fly.io / Koyeb / VPS (Node) | ✅ Works | Uses `server.mjs`. Render's free plan sleeps after 15 idle minutes (the first request then takes ~1 minute, so BitChord's health check may time out) and caps bandwidth, so use a paid plan or keep it awake. |
+| **Cloudflare Workers** | ✅ **Recommended** | Free plan: 100k requests/day, starts instantly, no server to manage, no secrets to set. |
+| Render / Railway / Fly.io / Koyeb / VPS (Node) | ✅ Works | Uses `server.mjs`. Render's free plan sleeps after 15 idle minutes (the first request then takes ~1 minute, so BitChord's health check may time out) so use a paid plan or keep it awake. |
 | Deno Deploy / Bun | ✅ Works | `src/worker.mjs` exports a standard `fetch` handler. |
-| Vercel / Netlify functions | ⚠️ Not recommended | Node functions cap response bodies at a few MB (FLAC files are 20–100 MB). Edge functions stream, but their duration limits cut long, slow playback reads, and bandwidth is billed. |
+| Vercel / Netlify | ✅ Works | Wrap `handle` from `src/addon.mjs` in a function; responses are small JSON. |
 
 ### Deploy to Cloudflare Workers (recommended)
 
 ```bash
 npm i -g wrangler          # or use npx
 wrangler login
-wrangler secret put MEDIA_SECRET   # paste a long random string, e.g. from: openssl rand -hex 32
 wrangler deploy
 ```
 
@@ -73,26 +71,24 @@ Your addon is at `https://muzo-bitchord-addon.<your-subdomain>.workers.dev/`. A 
 
 ```bash
 docker build -t muzo-bitchord-addon .
-docker run -d --name muzo-addon --restart unless-stopped -p 8787:8787 \
-  -e MEDIA_SECRET="$(openssl rand -hex 32)" muzo-bitchord-addon
+docker run -d --name muzo-addon --restart unless-stopped -p 8787:8787 muzo-bitchord-addon
 ```
 
-Or with Compose: `cp .env.example .env`, set `MEDIA_SECRET`, then `docker compose up -d`.
+Or with Compose: `docker compose up -d`.
 
 - The image is `node:20-alpine` with no npm packages. It runs as the non-root `node` user, has a `/health` `HEALTHCHECK` and listens on `PORT` (default 8787).
-- BitChord needs **HTTPS**, so put the container behind a TLS reverse proxy (Caddy, Nginx, Traefik or a Cloudflare Tunnel) and give listeners that `https://` address. The proxy must pass `Host` (or `X-Forwarded-Host`/`X-Forwarded-Proto`): the addon builds its media links from it.
-- Keep `MEDIA_SECRET` the same across restarts, or media links issued before the restart stop working (players simply fetch a new one).
-- Container platforms such as Google Cloud Run, Fly.io, Koyeb, Railway and Render (Docker runtime) can deploy this Dockerfile directly. On Cloud Run, raise the request timeout (default 5 min, max 60 min) so long audio streams aren't cut.
+- BitChord needs **HTTPS**, so put the container behind a TLS reverse proxy (Caddy, Nginx, Traefik or a Cloudflare Tunnel) and give listeners that `https://` address.
+- Container platforms such as Google Cloud Run, Fly.io, Koyeb, Railway and Render (Docker runtime) can deploy this Dockerfile directly.
 
 ### Deploy to Render
 
-Push this repo, then in Render choose **New → Blueprint** and pick the repo. `render.yaml` sets the start command,
-the `/health` check and a generated `MEDIA_SECRET`. Any other Node host: `MEDIA_SECRET=... PORT=8080 npm start`.
+Push this repo, then in Render choose **New → Blueprint** and pick the repo. `render.yaml` sets the start command
+and the `/health` check. Any other Node host: `PORT=8080 npm start`.
 
 ## Develop
 
 ```bash
-MEDIA_SECRET=dev npm start     # http://localhost:8787
+npm start                      # http://localhost:8787
 npm test                       # node:test, upstream mocked, no key needed
 npm run check                  # syntax check + tests
 ```

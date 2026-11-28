@@ -4,29 +4,16 @@ import {
   handle,
   toTracks,
   parseDuration,
-  parseFlacStreamInfo,
-  sealToken,
-  openToken,
+  bitDepthFromQuality,
+  OPEN_CDN_NODES,
   formatsForQuality,
   secondsUntilUtcMidnight,
-  CDN_INSTANCES,
   _clearCaches,
 } from "../src/addon.mjs";
 
 const KEY = "muzo_live_" + "ab".repeat(24);
-const ENV = { MEDIA_SECRET: "test-secret-please-change" };
+const ENV = {};
 const BASE = "https://addon.example.com";
-
-function flacHeader(sampleRate = 96000, bitDepth = 24, channels = 2) {
-  const b = new Uint8Array(42);
-  b.set([0x66, 0x4c, 0x61, 0x43, 0x80, 0, 0, 34]); // fLaC + last STREAMINFO block, len 34
-  const o = 18;
-  b[o] = (sampleRate >> 12) & 0xff;
-  b[o + 1] = (sampleRate >> 4) & 0xff;
-  b[o + 2] = ((sampleRate & 0x0f) << 4) | (((channels - 1) & 7) << 1) | (((bitDepth - 1) >> 4) & 1);
-  b[o + 3] = ((bitDepth - 1) & 0x0f) << 4;
-  return b;
-}
 
 /** Fake upstream: records every call and answers from a router function. */
 function fakeFetch(router) {
@@ -146,46 +133,69 @@ test("search maps Muzo 401 and 429 for BitChord", async () => {
   assert.ok(Number(r429.headers.get("retry-after")) > 0);
 });
 
-test("stream probes the CDN (no quota), reads FLAC info and returns a sealed media URL", async () => {
+const CDN_A = "https://calm-bread-1e03.muzom4andlossless.workers.dev";
+const CDN_B = "https://odd-frog-5512.antig9469.workers.dev";
+/** Shape of a real GET /api/v1/stream?id= answer (Nov 2026). */
+function streamAnswer(id = "R-hYM3BqTbA", extra = {}) {
+  return {
+    id,
+    name: "Self Aware",
+    artist: "Temper City",
+    cdnBaseUrl: CDN_A,
+    cdnInstances: [CDN_A, CDN_B],
+    format: "flac",
+    quality: "lossless_24bit",
+    losslessUrl: `${CDN_A}/muzo/cnd/flac/lossless/${id}`,
+    losslessUrls: [`${CDN_A}/muzo/cnd/flac/lossless/${id}`, `${CDN_B}/muzo/cnd/flac/lossless/${id}`],
+    m4aUrl: `${CDN_A}/muzo/cnd/m4a/stream/${id}`,
+    m4aUrls: [`${CDN_A}/muzo/cnd/m4a/stream/${id}`, `${CDN_B}/muzo/cnd/m4a/stream/${id}`],
+    ...extra,
+  };
+}
+
+test("stream returns Muzo's direct lossless URL unchanged (no proxy)", async () => {
+  const answer = streamAnswer();
   const f = fakeFetch((url, headers) => {
-    assert.ok(url.startsWith(CDN_INSTANCES[0] + "/muzo/cdn/flac/lossless/R-hYM3BqTbA"));
-    assert.equal(headers.get("authorization"), `Bearer ${KEY}`);
-    assert.equal(headers.get("range"), "bytes=0-41");
-    return new Response(flacHeader(96000, 24), { status: 206 });
+    assert.equal(url, "https://data.kouzu.in/api/v1/stream?id=R-hYM3BqTbA");
+    assert.equal(headers.get("x-api-key"), KEY);
+    return Response.json(answer);
   });
   const res = await call(`/${KEY}/stream/R-hYM3BqTbA?quality=lossless`, f);
   assert.equal(res.status, 200);
   const body = await res.json();
+  assert.equal(body.url, answer.losslessUrl, "URL must be exactly what Muzo gave");
+  assert.ok(!body.url.startsWith(BASE), "must not point back at the addon");
   assert.equal(body.codec, "flac");
+  assert.equal(body.container, "flac");
   assert.equal(body.manifest, "none");
   assert.equal(body.encrypted, false);
-  assert.equal(body.sampleRate, 96000);
   assert.equal(body.bitDepth, 24);
-  assert.equal(body.quality, "Lossless · 24-bit / 96 kHz");
-  assert.ok(body.url.startsWith(BASE + "/m/"));
-  assert.ok(!body.url.includes(KEY), "raw key must not appear in the media URL");
-  assert.ok(f.calls.every((c) => !c.url.startsWith("https://data.kouzu.in/api/v1/stream?")));
+  assert.equal(body.quality, "Lossless · 24-bit");
+  assert.equal(f.calls.length, 1, "one resolver call, no CDN probing");
 });
 
-test("stream falls back to AAC when FLAC is missing, and high quality asks AAC only", async () => {
-  const f = fakeFetch((url) =>
-    url.includes("/flac/") ? new Response("{}", { status: 404 }) : new Response(new Uint8Array(42), { status: 206 }),
-  );
-  const res = await call(`/${KEY}/stream/R-hYM3BqTbA?quality=lossless`, f);
-  const body = await res.json();
-  assert.equal(body.codec, "aac");
-  assert.equal(body.container, "mp4");
+test("high quality returns the direct AAC URL; lossless falls back to it when FLAC is missing", async () => {
+  const answer = streamAnswer();
+  const high = await (await call(`/${KEY}/stream/R-hYM3BqTbA?quality=HIGH`, fakeFetch(() => Response.json(answer)))).json();
+  assert.equal(high.url, answer.m4aUrl);
+  assert.equal(high.codec, "aac");
+  assert.equal(high.container, "mp4");
 
-  const g = fakeFetch((url) => {
-    assert.ok(url.includes("/m4a/stream/"));
-    return new Response(new Uint8Array(1), { status: 206 });
-  });
-  assert.equal((await call(`/${KEY}/stream/R-hYM3BqTbA?quality=HIGH`, g)).status, 200);
+  const noFlac = streamAnswer("R-hYM3BqTbA", { losslessUrl: null, losslessUrls: [] });
+  const body = await (await call(`/${KEY}/stream/R-hYM3BqTbA?quality=lossless`, fakeFetch(() => Response.json(noFlac)))).json();
+  assert.equal(body.url, noFlac.m4aUrl);
+  assert.equal(body.codec, "aac");
+});
+
+test("stream uses the first URL of the list when the single field is absent", async () => {
+  const answer = streamAnswer("R-hYM3BqTbA", { losslessUrl: undefined });
+  const body = await (await call(`/${KEY}/stream/R-hYM3BqTbA`, fakeFetch(() => Response.json(answer)))).json();
+  assert.equal(body.url, answer.losslessUrls[0]);
 });
 
 test("stream of an uncatalogued track is 404 and queues it via /stream/add", async () => {
   const f = fakeFetch((url) =>
-    url.includes("/api/v1/stream/add") ? Response.json({ queued: ["dQw4w9WgXcQ"] }) : new Response("{}", { status: 404 }),
+    url.includes("/api/v1/stream/add") ? Response.json({ queued: ["dQw4w9WgXcQ"] }) : Response.json({ error: "not found" }, { status: 404 }),
   );
   const res = await call(`/${KEY}/stream/dQw4w9WgXcQ`, f);
   assert.equal(res.status, 404);
@@ -194,53 +204,20 @@ test("stream of an uncatalogued track is 404 and queues it via /stream/add", asy
   assert.equal(add.headers.get("x-api-key"), null, "stream/add needs no key");
 });
 
-test("stream tries the next CDN node on network errors", async () => {
-  let n = 0;
-  const f = fakeFetch(() => {
-    if (n++ === 0) throw new TypeError("network down");
-    return new Response(flacHeader(44100, 16), { status: 206 });
+test("stream maps Muzo 401 and network errors", async () => {
+  assert.equal((await call(`/${KEY}/stream/R-hYM3BqTbA`, fakeFetch(() => Response.json({}, { status: 401 })))).status, 401);
+  const down = fakeFetch(() => {
+    throw new TypeError("network down");
   });
-  const body = await (await call(`/${KEY}/stream/R-hYM3BqTbA`, f)).json();
-  assert.equal(body.bitDepth, 16);
-  assert.ok(f.calls[1].url.startsWith(CDN_INSTANCES[1]));
+  assert.equal((await call(`/${KEY}/stream/R-hYM3BqTbA`, down)).status, 502);
 });
 
-test("stream rejects ids that are not video ids, and needs MEDIA_SECRET", async () => {
+test("stream rejects ids that are not video ids, needs no server secret, and /m is gone", async () => {
   const f = fakeFetch(() => assert.fail("no upstream"));
   assert.equal((await call(`/${KEY}/stream/abc`, f)).status, 404);
-  assert.equal((await call(`/${KEY}/stream/R-hYM3BqTbA`, f, {})).status, 500);
-});
-
-test("media proxy adds the bearer header, forwards Range and streams bytes", async () => {
-  const probeFetch = fakeFetch(() => new Response(flacHeader(), { status: 206 }));
-  const { url } = await (await call(`/${KEY}/stream/R-hYM3BqTbA`, probeFetch)).json();
-  const path = new URL(url).pathname;
-
-  const f = fakeFetch((u, headers) => {
-    assert.equal(u, CDN_INSTANCES[0] + "/muzo/cdn/flac/lossless/R-hYM3BqTbA");
-    assert.equal(headers.get("authorization"), `Bearer ${KEY}`);
-    assert.equal(headers.get("range"), "bytes=100-199");
-    return new Response(new Uint8Array(100), {
-      status: 206,
-      headers: { "content-type": "audio/flac", "content-range": "bytes 100-199/5000", "content-length": "100" },
-    });
-  });
-  const res = await call(path, f, ENV, { headers: { range: "bytes=100-199" } });
-  assert.equal(res.status, 206);
-  assert.equal(res.headers.get("content-range"), "bytes 100-199/5000");
-  assert.equal(res.headers.get("content-type"), "audio/flac");
-  assert.equal((await res.arrayBuffer()).byteLength, 100);
-});
-
-test("media tokens expire and cannot be forged", async () => {
-  const live = await sealToken("s", { k: KEY, i: "R-hYM3BqTbA", f: "flac", c: 0, e: Math.floor(Date.now() / 1000) + 60 });
-  assert.equal((await openToken("s", live)).i, "R-hYM3BqTbA");
-  assert.equal(await openToken("other-secret", live), null);
-  assert.equal(await openToken("s", live, Date.now() + 120_000), null);
-  assert.equal(await openToken("s", "garbage"), null);
-
-  const f = fakeFetch(() => assert.fail("no upstream"));
-  assert.equal((await call(`/m/${live.slice(0, -2)}xx.flac`, f, { MEDIA_SECRET: "s" })).status, 403);
+  const ok = await call(`/${KEY}/stream/R-hYM3BqTbA`, fakeFetch(() => Response.json(streamAnswer())), {});
+  assert.equal(ok.status, 200);
+  assert.equal((await call(`/m/sometoken.flac`, f)).status, 404);
 });
 
 test("usage returns quota numbers only, never account details", async () => {
@@ -259,10 +236,36 @@ test("helpers", () => {
   assert.equal(parseDuration({ durationSeconds: "180" }), 180);
   assert.equal(parseDuration({ duration: 214000 }), 214);
   assert.equal(parseDuration({}), undefined);
-  assert.deepEqual(parseFlacStreamInfo(flacHeader(192000, 24, 2)), { sampleRate: 192000, channels: 2, bitDepth: 24 });
-  assert.equal(parseFlacStreamInfo(new Uint8Array(42)), null);
+  assert.equal(bitDepthFromQuality("lossless_24bit"), 24);
+  assert.equal(bitDepthFromQuality("lossless_16bit"), 16);
+  assert.equal(bitDepthFromQuality("lossless"), undefined);
   assert.deepEqual(formatsForQuality("LOSSLESS"), ["flac", "m4a"]);
   assert.deepEqual(formatsForQuality("low"), ["m4a"]);
   assert.equal(secondsUntilUtcMidnight(Date.UTC(2025, 0, 1, 23, 59, 0)), 60);
   assert.equal(toTracks({ results: [{ resultType: "song", videoId: "R-hYM3BqTbA", title: "T", artists: ["A", "B"] }] }, "high")[0].artist, "A, B");
+});
+
+test("quota used up (429): stream hands out the same direct URL from an open node, never a proxy", async () => {
+  const f = fakeFetch((url, headers) => {
+    if (url.startsWith("https://data.kouzu.in/api/v1/stream?")) return Response.json({ error: "quota" }, { status: 429 });
+    assert.equal(headers.get("authorization"), null, "direct URLs need no auth");
+    assert.equal(headers.get("range"), "bytes=0-0", "only a 1-byte check");
+    if (url.startsWith(OPEN_CDN_NODES[0])) throw new TypeError("node down");
+    return new Response(new Uint8Array(1), { status: 206 });
+  });
+  const body = await (await call(`/${KEY}/stream/R-hYM3BqTbA?quality=lossless`, f)).json();
+  assert.equal(body.url, `${OPEN_CDN_NODES[1]}/muzo/cnd/flac/lossless/R-hYM3BqTbA`);
+  assert.equal(body.codec, "flac");
+  const high = await (await call(`/${KEY}/stream/R-hYM3BqTbA?quality=high`, f)).json();
+  assert.equal(high.url, `${OPEN_CDN_NODES[1]}/muzo/cnd/m4a/stream/R-hYM3BqTbA`);
+});
+
+test("quota used up and the track is missing everywhere: 404 and queued", async () => {
+  const f = fakeFetch((url) => {
+    if (url.includes("/api/v1/stream/add")) return Response.json({ queued: [] });
+    if (url.includes("/api/v1/stream?")) return Response.json({}, { status: 429 });
+    return new Response("{}", { status: 404 });
+  });
+  assert.equal((await call(`/${KEY}/stream/dQw4w9WgXcQ`, f)).status, 404);
+  assert.ok(f.calls.some((c) => c.url.includes("/api/v1/stream/add")));
 });

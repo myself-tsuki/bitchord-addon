@@ -1,17 +1,10 @@
 // Node 20+ entry point for full-server hosts (Render, Railway, Fly.io, Koyeb, a VPS).
-//   MEDIA_SECRET=... PORT=8787 node server.mjs
+//   PORT=8787 node server.mjs
 import http from "node:http";
-import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import { handle } from "./src/addon.mjs";
 
 const env = { ...process.env };
-if (!env.MEDIA_SECRET) {
-  env.MEDIA_SECRET = crypto.randomBytes(32).toString("hex");
-  console.warn(
-    "MEDIA_SECRET is not set: using a random one. Media links will stop working after a restart; set MEDIA_SECRET to a long random string.",
-  );
-}
 
 const port = Number(process.env.PORT) || 8787;
 
